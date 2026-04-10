@@ -1,9 +1,9 @@
 from flask import Flask, request, jsonify
-import sqlite3
 import json
 import requests
 from datetime import datetime
 from recommender import RecipeRecommender
+from database import load_menus, save_menus, load_users, save_users
 
 app = Flask(__name__)
 recommender = RecipeRecommender()
@@ -16,9 +16,6 @@ def init_database():
     init_db()
 
 init_database()
-
-def get_db():
-    return sqlite3.connect('eatwhat.db')
 
 @app.route('/')
 def index():
@@ -57,14 +54,15 @@ def login():
         })
 
 def save_user(openid):
-    db = get_db()
-    c = db.cursor()
-    c.execute('''
-        INSERT OR IGNORE INTO users (openid, created_at, updated_at)
-        VALUES (?, datetime('now'), datetime('now'))
-    ''', (openid,))
-    db.commit()
-    db.close()
+    users = load_users()
+    for user in users:
+        if user.get('openid') == openid:
+            return
+    users.append({
+        'openid': openid,
+        'created_at': datetime.now().isoformat()
+    })
+    save_users(users)
 
 @app.route('/api/user/profile', methods=['GET'])
 def get_user_profile():
@@ -73,29 +71,22 @@ def get_user_profile():
     if not openid:
         return jsonify({'success': False, 'message': '缺少openid'})
 
-    db = get_db()
-    c = db.cursor()
-    c.execute('''
-        SELECT nickname, avatar_url, settings, preferences, subscribed, created_at
-        FROM users WHERE openid = ?
-    ''', (openid,))
-    result = c.fetchone()
-    db.close()
+    users = load_users()
+    for user in users:
+        if user.get('openid') == openid:
+            return jsonify({
+                'success': True,
+                'data': {
+                    'nickname': user.get('nickname', ''),
+                    'avatar_url': user.get('avatar_url', ''),
+                    'settings': user.get('settings', {}),
+                    'preferences': user.get('preferences', {}),
+                    'subscribed': user.get('subscribed', False),
+                    'created_at': user.get('created_at', '')
+                }
+            })
 
-    if not result:
-        return jsonify({'success': False, 'message': '用户不存在'})
-
-    return jsonify({
-        'success': True,
-        'data': {
-            'nickname': result[0] or '',
-            'avatar_url': result[1] or '',
-            'settings': json.loads(result[2]) if result[2] else {},
-            'preferences': json.loads(result[3]) if result[3] else {},
-            'subscribed': result[4] == 1,
-            'created_at': result[5]
-        }
-    })
+    return jsonify({'success': False, 'message': '用户不存在'})
 
 @app.route('/api/user/settings', methods=['POST'])
 def update_settings():
@@ -106,15 +97,13 @@ def update_settings():
     if not openid:
         return jsonify({'success': False, 'message': '缺少openid'})
 
-    db = get_db()
-    c = db.cursor()
-    c.execute('''
-        UPDATE users
-        SET settings = ?, updated_at = datetime('now')
-        WHERE openid = ?
-    ''', (json.dumps(settings), openid))
-    db.commit()
-    db.close()
+    users = load_users()
+    for user in users:
+        if user.get('openid') == openid:
+            user['settings'] = settings
+            user['updated_at'] = datetime.now().isoformat()
+            break
+    save_users(users)
 
     return jsonify({'success': True, 'message': '设置已更新'})
 
@@ -127,15 +116,13 @@ def update_preferences():
     if not openid:
         return jsonify({'success': False, 'message': '缺少openid'})
 
-    db = get_db()
-    c = db.cursor()
-    c.execute('''
-        UPDATE users
-        SET preferences = ?, updated_at = datetime('now')
-        WHERE openid = ?
-    ''', (json.dumps(preferences), openid))
-    db.commit()
-    db.close()
+    users = load_users()
+    for user in users:
+        if user.get('openid') == openid:
+            user['preferences'] = preferences
+            user['updated_at'] = datetime.now().isoformat()
+            break
+    save_users(users)
 
     return jsonify({'success': True, 'message': '偏好已更新'})
 
@@ -148,15 +135,13 @@ def subscribe_message():
     if not openid:
         return jsonify({'success': False, 'message': '缺少openid'})
 
-    db = get_db()
-    c = db.cursor()
-    c.execute('''
-        UPDATE users
-        SET subscribed = ?, updated_at = datetime('now')
-        WHERE openid = ?
-    ''', (1 if enabled else 0, openid))
-    db.commit()
-    db.close()
+    users = load_users()
+    for user in users:
+        if user.get('openid') == openid:
+            user['subscribed'] = enabled
+            user['updated_at'] = datetime.now().isoformat()
+            break
+    save_users(users)
 
     return jsonify({
         'success': True,
@@ -168,7 +153,15 @@ def get_weekly_menu():
     openid = request.args.get('openid')
 
     menu = recommender.generate_weekly_menu(openid=openid)
-    save_menu(menu)
+
+    menus = load_menus()
+    menus.append({
+        'start_date': menu['start_date'],
+        'end_date': menu['end_date'],
+        'menu_data': menu,
+        'created_at': datetime.now().isoformat()
+    })
+    save_menus(menus)
 
     return jsonify({
         'success': True,
@@ -180,29 +173,32 @@ def get_today_menu():
     openid = request.args.get('openid')
     today = datetime.now().strftime('%Y-%m-%d')
 
-    db = get_db()
-    c = db.cursor()
-    c.execute('''
-        SELECT menu_data FROM weekly_menus
-        WHERE start_date <= ? AND end_date >= ?
-        ORDER BY created_at DESC LIMIT 1
-    ''', (today, today))
-    result = c.fetchone()
-    db.close()
+    menus = load_menus()
+    for m in reversed(menus):
+        menu_data = m.get('menu_data', {})
+        start_date = menu_data.get('start_date', '')
+        end_date = menu_data.get('end_date', '')
 
-    if result:
-        menu_data = json.loads(result[0])
-        for day in menu_data['days']:
-            if day['date'] == today:
-                return jsonify({
-                    'success': True,
-                    'data': day
-                })
+        if start_date <= today <= end_date:
+            for day in menu_data.get('days', []):
+                if day.get('date') == today:
+                    return jsonify({
+                        'success': True,
+                        'data': day
+                    })
 
     menu = recommender.generate_weekly_menu(openid=openid)
-    save_menu(menu)
-    for day in menu['days']:
-        if day['date'] == today:
+
+    menus.append({
+        'start_date': menu['start_date'],
+        'end_date': menu['end_date'],
+        'menu_data': menu,
+        'created_at': datetime.now().isoformat()
+    })
+    save_menus(menus)
+
+    for day in menu.get('days', []):
+        if day.get('date') == today:
             return jsonify({
                 'success': True,
                 'data': day
@@ -242,23 +238,20 @@ def get_recipes():
 def get_purchase_list():
     today = datetime.now().strftime('%Y-%m-%d')
 
-    db = get_db()
-    c = db.cursor()
-    c.execute('''
-        SELECT menu_data FROM weekly_menus
-        WHERE start_date <= ? AND end_date >= ?
-        ORDER BY created_at DESC LIMIT 1
-    ''', (today, today))
-    result = c.fetchone()
-    db.close()
+    menus = load_menus()
+    menu_data = None
+    for m in reversed(menus):
+        data = m.get('menu_data', {})
+        start_date = data.get('start_date', '')
+        end_date = data.get('end_date', '')
 
-    if not result:
-        return jsonify({
-            'success': False,
-            'message': 'No menu found'
-        })
+        if start_date <= today <= end_date:
+            menu_data = data
+            break
 
-    menu_data = json.loads(result[0])
+    if not menu_data:
+        menu_data = recommender.generate_weekly_menu()
+
     ingredients = recommender.get_all_ingredients_for_week(menu_data)
 
     meituan_keywords = '+'.join(list(ingredients.keys())[:10])
@@ -277,22 +270,19 @@ def get_purchase_list():
 def get_nutrition_analysis():
     today = datetime.now().strftime('%Y-%m-%d')
 
-    db = get_db()
-    c = db.cursor()
-    c.execute('''
-        SELECT menu_data FROM weekly_menus
-        WHERE start_date <= ? AND end_date >= ?
-        ORDER BY created_at DESC LIMIT 1
-    ''', (today, today))
-    result = c.fetchone()
-    db.close()
+    menus = load_menus()
+    menu_data = None
+    for m in reversed(menus):
+        data = m.get('menu_data', {})
+        start_date = data.get('start_date', '')
+        end_date = data.get('end_date', '')
 
-    if not result:
-        menu = recommender.generate_weekly_menu()
-        save_menu(menu)
-        menu_data = menu
-    else:
-        menu_data = json.loads(result[0])
+        if start_date <= today <= end_date:
+            menu_data = data
+            break
+
+    if not menu_data:
+        menu_data = recommender.generate_weekly_menu()
 
     analysis = recommender.get_nutrition_analysis(menu_data)
 
@@ -305,27 +295,26 @@ def get_nutrition_analysis():
 def get_nutrition_today():
     today = datetime.now().strftime('%Y-%m-%d')
 
-    db = get_db()
-    c = db.cursor()
-    c.execute('''
-        SELECT menu_data FROM weekly_menus
-        WHERE start_date <= ? AND end_date >= ?
-        ORDER BY created_at DESC LIMIT 1
-    ''', (today, today))
-    result = c.fetchone()
-    db.close()
+    menus = load_menus()
+    menu_data = None
+    for m in reversed(menus):
+        data = m.get('menu_data', {})
+        start_date = data.get('start_date', '')
+        end_date = data.get('end_date', '')
 
-    if not result:
+        if start_date <= today <= end_date:
+            menu_data = data
+            break
+
+    if not menu_data:
         return jsonify({
             'success': False,
             'message': 'No menu found'
         })
 
-    menu_data = json.loads(result[0])
-
     day_index = None
-    for i, day in enumerate(menu_data['days']):
-        if day['date'] == today:
+    for i, day in enumerate(menu_data.get('days', [])):
+        if day.get('date') == today:
             day_index = i
             break
 
@@ -358,16 +347,6 @@ def handle_subscribe():
         'message': '订阅消息功能已开启',
         'reminder': '每周日18:00会自动推送下周菜谱'
     })
-
-def save_menu(menu):
-    db = get_db()
-    c = db.cursor()
-    c.execute('''
-        INSERT INTO weekly_menus (start_date, end_date, menu_data, created_at)
-        VALUES (?, ?, ?, datetime('now'))
-    ''', (menu['start_date'], menu['end_date'], json.dumps(menu, ensure_ascii=False)))
-    db.commit()
-    db.close()
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
