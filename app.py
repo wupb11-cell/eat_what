@@ -377,6 +377,8 @@ def health_check():
     })
 
 if __name__ == '__main__':
+    import os
+    port = int(os.environ.get('PORT', 5000))
     print("=" * 50)
     print("EatWhat 饮食推荐助手 - 小程序后端API")
     print("=" * 50)
@@ -404,4 +406,4 @@ if __name__ == '__main__':
     print("  其他：")
     print("    - GET  /api/health - 健康检查")
     print("=" * 50)
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=port, debug=True)
