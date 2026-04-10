@@ -1,108 +1,50 @@
-import sqlite3
 import json
 import random
 from datetime import datetime, timedelta
-from dateutil.parser import parse
+from database import load_recipes, load_menus, save_menus, load_users, save_users
 
 class RecipeRecommender:
-    def __init__(self, db_path='eatwhat.db'):
-        self.db_path = db_path
-
-    def get_connection(self):
-        return sqlite3.connect(self.db_path)
+    def __init__(self):
+        self.recipes = load_recipes()
 
     def get_all_recipes(self, category=None, limit=None):
-        conn = self.get_connection()
-        c = conn.cursor()
-
+        recipes = self.recipes
         if category:
-            c.execute('SELECT * FROM recipes WHERE category = ? ORDER BY gi_value ASC', (category,))
-        else:
-            c.execute('SELECT * FROM recipes ORDER BY gi_value ASC')
-
-        recipes = []
-        for row in c.fetchall():
-            recipes.append(self._row_to_dict(row))
-
-        conn.close()
+            recipes = [r for r in recipes if r.get('category') == category]
+        recipes.sort(key=lambda x: x.get('gi_value', 0))
         return recipes[:limit] if limit else recipes
 
-    def _row_to_dict(self, row):
-        return {
-            'id': row[0],
-            'name': row[1],
-            'category': row[2],
-            'ingredients': json.loads(row[3]) if isinstance(row[3], str) else row[3],
-            'steps': json.loads(row[4]) if isinstance(row[4], str) else row[4],
-            'cost': row[5],
-            'difficulty': row[6],
-            'gi_value': row[7],
-            'cook_time': row[8],
-            'nutrition_tags': json.loads(row[9]) if isinstance(row[9], str) else (row[9] or []),
-            'season': row[10],
-            'calories': row[11] if len(row) > 11 else 0,
-            'protein': row[12] if len(row) > 12 else 0,
-            'carbs': row[13] if len(row) > 13 else 0,
-            'fat': row[14] if len(row) > 14 else 0,
-            'fiber': row[15] if len(row) > 15 else 0
-        }
-
     def get_recipes_by_category(self, category, limit=20):
-        conn = self.get_connection()
-        c = conn.cursor()
-        c.execute('''
-            SELECT * FROM recipes
-            WHERE category = ? AND gi_value < 55 AND difficulty <= 3
-            ORDER BY RANDOM()
-            LIMIT ?
-        ''', (category, limit))
-
-        recipes = [self._row_to_dict(row) for row in c.fetchall()]
-        conn.close()
-        return recipes
+        recipes = [r for r in self.recipes if r.get('category') == category and r.get('gi_value', 0) < 55 and r.get('difficulty', 0) <= 3]
+        random.shuffle(recipes)
+        return recipes[:limit]
 
     def get_recipes_by_day(self, day_of_week):
-        conn = self.get_connection()
-        c = conn.cursor()
-
         season_map = {
             0: 'spring', 1: 'spring', 2: 'summer', 3: 'summer',
             4: 'autumn', 5: 'autumn', 6: 'winter'
         }
         season = season_map.get(day_of_week, 'all')
 
-        c.execute('''
-            SELECT * FROM recipes
-            WHERE (season = ? OR season = 'all')
-            AND gi_value < 55 AND difficulty <= 3
-            ORDER BY RANDOM()
-            LIMIT 10
-        ''', (season,))
-
-        recipes = [self._row_to_dict(row) for row in c.fetchall()]
-        conn.close()
-        return recipes
+        recipes = [r for r in self.recipes
+                   if (r.get('season') == season or r.get('season') == 'all')
+                   and r.get('gi_value', 0) < 55
+                   and r.get('difficulty', 0) <= 3]
+        random.shuffle(recipes)
+        return recipes[:10]
 
     def get_user_preferences(self, openid):
-        conn = self.get_connection()
-        c = conn.cursor()
-        c.execute('SELECT preferences FROM users WHERE openid = ?', (openid,))
-        result = c.fetchone()
-        conn.close()
-
-        if result and result[0]:
-            return json.loads(result[0])
+        users = load_users()
+        for user in users:
+            if user.get('openid') == openid:
+                return user.get('preferences', {})
         return {}
 
     def get_user_settings(self, openid):
-        conn = self.get_connection()
-        c = conn.cursor()
-        c.execute('SELECT settings FROM users WHERE openid = ?', (openid,))
-        result = c.fetchone()
-        conn.close()
-
-        if result and result[0]:
-            return json.loads(result[0])
+        users = load_users()
+        for user in users:
+            if user.get('openid') == openid:
+                return user.get('settings', {})
         return {}
 
     def generate_weekly_menu(self, start_date=None, openid=None):
@@ -153,13 +95,13 @@ class RecipeRecommender:
             for meal_type in ['breakfast', 'lunch', 'dinner']:
                 available_recipes = [
                     r for r in self.get_recipes_by_day(day_of_week)
-                    if r['id'] not in used_recipe_ids and r['category'] == meal_type
+                    if r['id'] not in used_recipe_ids and r.get('category') == meal_type
                 ]
 
                 if not available_recipes:
                     available_recipes = [
                         r for r in self.get_recipes_by_category(meal_type)
-                        if r['category'] == meal_type
+                        if r.get('category') == meal_type
                     ]
 
                 available_recipes = self._filter_by_preferences(available_recipes, preferences)
@@ -187,7 +129,7 @@ class RecipeRecommender:
         for day in weekly_menu['days']:
             for meal_type in ['breakfast', 'lunch', 'dinner']:
                 if meal_type in day['meals']:
-                    gi_values.append(day['meals'][meal_type]['gi_value'])
+                    gi_values.append(day['meals'][meal_type].get('gi_value', 0))
 
         if gi_values:
             weekly_menu['total_nutrition']['gi_avg'] = round(sum(gi_values) / len(gi_values), 1)
@@ -208,12 +150,6 @@ class RecipeRecommender:
                     if tag in recipe_tags:
                         include = False
                         break
-
-            if 'prefer_tags' in preferences and include:
-                recipe_tags = recipe.get('nutrition_tags', [])
-                if preferences['prefer_tags']:
-                    if not any(tag in recipe_tags for tag in preferences['prefer_tags']):
-                        include = False
 
             if include:
                 filtered.append(recipe)
@@ -239,57 +175,13 @@ class RecipeRecommender:
                     message += f"GI:{recipe['gi_value']} {gi_status}\n"
             message += "\n"
 
-        nutrition = weekly_menu.get('total_nutrition', {})
-        message += "📊 本周营养总览：\n"
-        message += f"   热量：{nutrition.get('calories', 0)}kcal\n"
-        message += f"   蛋白质：{nutrition.get('protein', 0)}g\n"
-        message += f"   碳水：{nutrition.get('carbs', 0)}g\n"
-        message += f"   脂肪：{nutrition.get('fat', 0)}g\n"
-        message += f"   纤维：{nutrition.get('fiber', 0)}g\n"
-        message += f"   平均GI：{nutrition.get('gi_avg', 0)}\n\n"
-
-        message += "🛒 采购清单：点击获取本周食材购买链接\n"
-        message += "回复「今日菜谱」获取当天详细做法\n"
-        message += "回复「帮助」查看更多功能\n"
-
         return message
 
     def get_recipe_detail(self, recipe_id):
-        conn = self.get_connection()
-        c = conn.cursor()
-        c.execute('SELECT * FROM recipes WHERE id = ?', (recipe_id,))
-        row = c.fetchone()
-        conn.close()
-
-        if not row:
-            return None
-
-        recipe = self._row_to_dict(row)
-
-        detail = f"🍳 {recipe['name']}\n"
-        detail += f"📂 分类：{recipe['category']}\n"
-        detail += f"💰 成本：{recipe['cost']}元\n"
-        detail += f"⏱️ 耗时：{recipe['cook_time']}分钟\n"
-        detail += f"🔥 难度：{'⭐' * recipe['difficulty']}\n"
-        detail += f"📉 GI值：{recipe['gi_value']}\n"
-        detail += f"🏷️ 标签：{', '.join(recipe['nutrition_tags'])}\n\n"
-
-        detail += "📝 食材清单：\n"
-        for ing in recipe['ingredients']:
-            detail += f"• {ing}\n"
-
-        detail += "\n👩‍🍳 做法步骤：\n"
-        for i, step in enumerate(recipe['steps'], 1):
-            detail += f"{i}. {step}\n"
-
-        detail += "\n📊 营养成分（每份）：\n"
-        detail += f"   热量：{recipe.get('calories', 0)}kcal\n"
-        detail += f"   蛋白质：{recipe.get('protein', 0)}g\n"
-        detail += f"   碳水：{recipe.get('carbs', 0)}g\n"
-        detail += f"   脂肪：{recipe.get('fat', 0)}g\n"
-        detail += f"   纤维：{recipe.get('fiber', 0)}g\n"
-
-        return detail
+        for recipe in self.recipes:
+            if recipe.get('id') == recipe_id:
+                return recipe
+        return None
 
     def get_all_ingredients_for_week(self, weekly_menu):
         all_ingredients = {}
@@ -298,7 +190,7 @@ class RecipeRecommender:
             for meal_type in ['breakfast', 'lunch', 'dinner']:
                 if meal_type in day['meals']:
                     recipe = day['meals'][meal_type]
-                    for ing in recipe['ingredients']:
+                    for ing in recipe.get('ingredients', []):
                         name, amount = ing.rsplit(':', 1) if ':' in ing else (ing, '适量')
                         name = name.strip()
                         if name in all_ingredients:
@@ -387,27 +279,9 @@ class RecipeRecommender:
                 'message': '蛋白质摄入略低，建议增加肉类、蛋类、豆制品'
             })
 
-        avg_fiber = sum(d['fiber'] for d in daily_nutritions) / 7
-        if avg_fiber < 20:
-            recommendations.append({
-                'type': 'success',
-                'message': '纤维摄入良好，继续保持多吃蔬菜的习惯'
-            })
-
-        avg_gi = sum(d['gi_avg'] for d in daily_nutritions if d['gi_avg']) / 7
-        if avg_gi < 55:
-            recommendations.append({
-                'type': 'success',
-                'message': f'平均GI值{avg_gi}，非常适合控制血糖'
-            })
-
         return recommendations
 
 if __name__ == '__main__':
     recommender = RecipeRecommender()
     menu = recommender.generate_weekly_menu()
     print(recommender.format_menu_message(menu))
-
-    analysis = recommender.get_nutrition_analysis(menu)
-    print("\n📊 营养分析：")
-    print(json.dumps(analysis, ensure_ascii=False, indent=2))
